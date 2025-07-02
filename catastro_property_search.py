@@ -58,15 +58,39 @@ def load_full_data_with_geometry():
 def convert_coordinates(x, y, from_epsg=25830, to_epsg=4326):
     """Convert coordinates from one projection to another (requires pyproj)"""
     try:
-        from pyproj import Transformer
-        transformer = Transformer.from_epsg(from_epsg, to_epsg, always_xy=True)
-        lon, lat = transformer.transform(x, y)
-        return lat, lon
+        import pyproj
+        
+        # Try newer pyproj API first
+        try:
+            from pyproj import Transformer
+            transformer = Transformer.from_epsg(from_epsg, to_epsg, always_xy=True)
+            lon, lat = transformer.transform(x, y)
+            return lat, lon
+        except AttributeError:
+            # Fallback to older pyproj API
+            try:
+                from pyproj import Proj, transform
+                source = Proj(proj='utm', zone=30, ellps='WGS84', datum='WGS84')
+                target = Proj(proj='latlong', datum='WGS84')
+                lon, lat = transform(source, target, x, y)
+                return lat, lon
+            except:
+                # If both fail, use manual conversion
+                raise ImportError("pyproj API incompatible")
+                
     except ImportError:
         # Fallback: rough approximation for EPSG:25830 to WGS84 for Spain
-        # This is a simplified approximation and should not be used for precise mapping
-        lat = (y - 4000000) / 111320.0 + 36.0  # Rough conversion for latitude
-        lon = (x - 500000) / 111320.0 - 3.0      # Simplified longitude conversion
+        # EPSG:25830 is UTM Zone 30N, so we can do a reasonable approximation
+        # Convert from UTM Zone 30N to lat/lon
+        
+        # UTM Zone 30N parameters
+        lat_rad = (y - 4000000) / 6378137.0  # Rough latitude conversion
+        lat = lat_rad * 180 / 3.14159 + 36.0  # Convert to degrees, offset for Spain
+        
+        # Longitude calculation for UTM Zone 30N (central meridian -3°)
+        lon_rad = (x - 500000) / (6378137.0 * 0.9996)  # UTM scale factor 0.9996
+        lon = lon_rad * 180 / 3.14159 - 3.0  # Central meridian of Zone 30N
+        
         return lat, lon
     except Exception as e:
         # Debug: uncomment to see conversion errors
@@ -162,8 +186,8 @@ def create_map(properties_df, geometry_df=None):
                     lat, lon = extract_geometry_center(geometry)
                     
                     if lat and lon and not (np.isnan(lat) or np.isnan(lon)):
-                        # Validate coordinates are reasonable for Spain
-                        if 35.0 <= lat <= 44.0 and -10.0 <= lon <= 5.0:
+                        # Validate coordinates are reasonable for Spain (expanded bounds)
+                        if 35.0 <= lat <= 45.0 and -12.0 <= lon <= 6.0:
                             # Create popup content
                             popup_text = f"""
                             <b>{property_row.get('municipio', 'Unknown')}</b><br>
@@ -209,7 +233,7 @@ def create_map(properties_df, geometry_df=None):
                     if not geometry_row.empty:
                         geometry = geometry_row.iloc[0].get('geometry')
                         lat, lon = extract_geometry_center(geometry)
-                        if lat and lon and not (np.isnan(lat) or np.isnan(lon)) and 35.0 <= lat <= 44.0 and -10.0 <= lon <= 5.0:
+                        if lat and lon and not (np.isnan(lat) or np.isnan(lon)) and 35.0 <= lat <= 45.0 and -12.0 <= lon <= 6.0:
                             locations.append([lat, lon])
             
             if locations:
@@ -243,63 +267,39 @@ def calculate_match_score(row, filters):
             score += 30
     
     # Parcel area match (medium weight)
-    if filters['parcel_area_range'][0] > 0 or filters['parcel_area_range'][1] < 100000:
+    if filters['parcel_area_range'][0] > 0 or filters['parcel_area_range'][1] < 1000000:
         max_score += 20
         parcel_area = row.get('superficie_parcela', 0)
         
-        # Handle >100,000 case
-        if filters['parcel_area_range'][1] == 100000:
-            # If slider at max, check if area >= min value
-            if parcel_area >= filters['parcel_area_range'][0]:
-                score += 20
-            else:
-                # Partial score for being close
-                distance = abs(parcel_area - filters['parcel_area_range'][0])
-                if distance < parcel_area * 0.5:
-                    score += 10
+        if filters['parcel_area_range'][0] <= parcel_area <= filters['parcel_area_range'][1]:
+            score += 20
         else:
-            # Normal range check
-            if filters['parcel_area_range'][0] <= parcel_area <= filters['parcel_area_range'][1]:
-                score += 20
-            else:
-                # Partial score for being close
-                distance = min(
-                    abs(parcel_area - filters['parcel_area_range'][0]),
-                    abs(parcel_area - filters['parcel_area_range'][1])
-                )
-                if distance < parcel_area * 0.5:  # Within 50% of range
-                    score += 10
+            # Partial score for being close
+            distance = min(
+                abs(parcel_area - filters['parcel_area_range'][0]),
+                abs(parcel_area - filters['parcel_area_range'][1])
+            )
+            if distance < parcel_area * 0.5:  # Within 50% of range
+                score += 10
     
     # Built area match (medium weight)
-    if filters['built_area_range'][0] > 0 or filters['built_area_range'][1] < 1000:
+    if filters['built_area_range'][0] > 0 or filters['built_area_range'][1] < 100000:
         max_score += 20
         
         if filters.get('area_search_type', 'Total built area on parcel') == "Total built area on parcel":
             # Traditional total built area scoring
             built_area = row.get('total_built_area', 0)
             
-            # Handle >1,000 case
-            if filters['built_area_range'][1] == 1000:
-                # If slider at max, check if area >= min value
-                if built_area >= filters['built_area_range'][0]:
-                    score += 20
-                else:
-                    # Partial score for being close
-                    distance = abs(built_area - filters['built_area_range'][0])
-                    if distance < built_area * 0.5:
-                        score += 10
+            if filters['built_area_range'][0] <= built_area <= filters['built_area_range'][1]:
+                score += 20
             else:
-                # Normal range check
-                if filters['built_area_range'][0] <= built_area <= filters['built_area_range'][1]:
-                    score += 20
-                else:
-                    # Partial score for being close
-                    distance = min(
-                        abs(built_area - filters['built_area_range'][0]),
-                        abs(built_area - filters['built_area_range'][1])
-                    )
-                    if distance < built_area * 0.5:
-                        score += 10
+                # Partial score for being close
+                distance = min(
+                    abs(built_area - filters['built_area_range'][0]),
+                    abs(built_area - filters['built_area_range'][1])
+                )
+                if distance < built_area * 0.5:
+                    score += 10
         else:
             # Individual building/unit area scoring
             found_match = False
@@ -310,14 +310,9 @@ def calculate_match_score(row, filters):
                 for area_str in building_areas:
                     try:
                         area = float(area_str)
-                        if filters['built_area_range'][1] == 1000:
-                            if area >= filters['built_area_range'][0]:
-                                found_match = True
-                                break
-                        else:
-                            if filters['built_area_range'][0] <= area <= filters['built_area_range'][1]:
-                                found_match = True
-                                break
+                        if filters['built_area_range'][0] <= area <= filters['built_area_range'][1]:
+                            found_match = True
+                            break
                     except (ValueError, TypeError):
                         continue
             
@@ -328,14 +323,9 @@ def calculate_match_score(row, filters):
                     for area_str in unit_areas:
                         try:
                             area = float(area_str)
-                            if filters['built_area_range'][1] == 1000:
-                                if area >= filters['built_area_range'][0]:
-                                    found_match = True
-                                    break
-                            else:
-                                if filters['built_area_range'][0] <= area <= filters['built_area_range'][1]:
-                                    found_match = True
-                                    break
+                            if filters['built_area_range'][0] <= area <= filters['built_area_range'][1]:
+                                found_match = True
+                                break
                         except (ValueError, TypeError):
                             continue
             
@@ -431,9 +421,11 @@ def display_property_card(row, rank, match_score):
             buildings_types = parse_structured_data(row.get('buildings_types', ''), 'csv')
             
             if buildings_areas and buildings_types:
+                # Ensure arrays have the same length
+                min_len = min(len(buildings_areas), len(buildings_types))
                 building_df = pd.DataFrame({
-                    'Area (m²)': buildings_areas[:len(buildings_types)],
-                    'Type': buildings_types
+                    'Area (m²)': buildings_areas[:min_len],
+                    'Type': buildings_types[:min_len]
                 })
                 st.dataframe(building_df, use_container_width=True)
             else:
@@ -446,10 +438,18 @@ def display_property_card(row, rank, match_score):
             units_types = parse_structured_data(row.get('units_use_types', ''), 'csv')
             
             if units_years and units_types:
+                # Ensure all arrays have the same length
+                min_len = min(len(units_years), len(units_types))
+                # Prepare age data with same length
+                if units_ages and len(units_ages) >= min_len:
+                    age_data = units_ages[:min_len]
+                else:
+                    age_data = ['N/A'] * min_len
+                
                 unit_df = pd.DataFrame({
-                    'Year Built': units_years[:len(units_types)],
-                    'Age': units_ages[:len(units_types)] if units_ages else ['N/A'] * len(units_types),
-                    'Use Type': units_types
+                    'Year Built': units_years[:min_len],
+                    'Age': age_data,
+                    'Use Type': units_types[:min_len]
                 })
                 st.dataframe(unit_df, use_container_width=True)
             else:
@@ -467,6 +467,12 @@ def display_property_card(row, rank, match_score):
             with col4:
                 avg_age = row.get('avg_building_age', 0)
                 st.metric("Avg Building Age", f"{avg_age:.1f} years")
+            
+            # Link to official cadastral website
+            cadastral_ref = row.get('referencia_catastral', '')
+            if cadastral_ref:
+                cadastral_url = f"https://www1.sedecatastro.gob.es/CYCBienInmueble/OVCBusqueda.aspx?fromVolver=ListaBienes&tipoVia=&via=&num=&blq=&esc=&plt=&pta=&descProv=&prov=&mun=&descMuni=&TipUR=&codVia=&comVia=&final=&pest=rc&pol=&par=&Idufir=&RCCompleta={cadastral_ref}&latitud=&longitud=&gradoslat=&minlat=&seglat=&gradoslon=&minlon=&seglon=&x=&y=&huso=&tipoCoordenadas="
+                st.markdown(f"**🔗 [View on Official Spanish Cadastral Website]({cadastral_url})**")
             
             if st.button(f"❌ Close Details", key=f"close_{rank}_{row.get('referencia_catastral', rank)}"):
                 st.session_state[f'show_details_{rank}'] = False
@@ -501,24 +507,15 @@ def main():
     regions = ['All'] + sorted(df['municipio'].dropna().unique().tolist())
     selected_region = st.sidebar.selectbox("📍 Region (Municipality)", regions)
     
-    # Parcel area filter (0 to 100,000, with >100,000 option)
-    parcel_area_range = st.sidebar.slider(
-        "📏 Parcel Area (m²)", 
-        0, 100000, 
-        (0, 100000),
-        step=1000
-    )
-    
-    # Exact number inputs for parcel area
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Exact Values:**")
+    # Parcel area filter
+    st.sidebar.subheader("📏 Parcel Area")
     col1, col2 = st.sidebar.columns(2)
     with col1:
         parcel_min_exact = st.number_input(
             "Min (m²)", 
             min_value=0, 
             max_value=1000000, 
-            value=parcel_area_range[0],
+            value=0,
             step=100,
             key="parcel_min"
         )
@@ -527,48 +524,29 @@ def main():
             "Max (m²)", 
             min_value=0, 
             max_value=1000000, 
-            value=parcel_area_range[1] if parcel_area_range[1] < 100000 else 100000,
+            value=100000,
             step=100,
             key="parcel_max"
         )
-        # Checkbox for >100,000
-        parcel_unlimited = st.checkbox("No max limit", value=(parcel_area_range[1] == 100000), key="parcel_unlimited")
     
-    # Use exact values if provided, otherwise use slider values
-    if parcel_unlimited:
-        final_parcel_range = (parcel_min_exact, 100000)  # Use 100000 as marker for unlimited
-        parcel_display = f"{parcel_min_exact:,} - >100,000 m²"
-    else:
-        final_parcel_range = (parcel_min_exact, parcel_max_exact)
-        parcel_display = f"{parcel_min_exact:,} - {parcel_max_exact:,} m²"
+    final_parcel_range = (parcel_min_exact, parcel_max_exact)
     
-    st.sidebar.caption(f"Selected: {parcel_display}")
-    
-    # Built area filter (0 to 1,000, with >1,000 option)
+    # Built area filter
+    st.sidebar.subheader("🏗️ Built Area")
     # Option to search total or individual building/unit area
     area_search_type = st.sidebar.radio(
-        "🏗️ Built Area Search Type:",
+        "Search Type:",
         ["Total built area on parcel", "Individual building/unit area"],
         help="Choose whether to search by total area or individual building/unit size"
     )
     
-    built_area_range = st.sidebar.slider(
-        "Built Area (m²)", 
-        0, 1000, 
-        (0, 1000),
-        step=50
-    )
-    
-    # Exact number inputs for built area
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Exact Values:**")
     col3, col4 = st.sidebar.columns(2)
     with col3:
         built_min_exact = st.number_input(
             "Min (m²)", 
             min_value=0, 
             max_value=100000, 
-            value=built_area_range[0],
+            value=0,
             step=10,
             key="built_min"
         )
@@ -577,24 +555,12 @@ def main():
             "Max (m²)", 
             min_value=0, 
             max_value=100000, 
-            value=built_area_range[1] if built_area_range[1] < 1000 else 1000,
+            value=1000,
             step=10,
             key="built_max"
         )
-        # Checkbox for >1,000
-        built_unlimited = st.checkbox("No max limit", value=(built_area_range[1] == 1000), key="built_unlimited")
     
-    # Use exact values if provided, otherwise use slider values
-    if built_unlimited:
-        final_built_range = (built_min_exact, 1000)  # Use 1000 as marker for unlimited
-        built_display = f"{built_min_exact:,} - >1,000 m²"
-    else:
-        final_built_range = (built_min_exact, built_max_exact)
-        built_display = f"{built_min_exact:,} - {built_max_exact:,} m²"
-    
-    st.sidebar.caption(f"Selected: {built_display}")
-    
-    st.sidebar.markdown("---")
+    final_built_range = (built_min_exact, built_max_exact)
     
     # Year range filter
     current_year = datetime.now().year
@@ -654,31 +620,21 @@ def main():
         if selected_region != 'All':
             filtered_df = filtered_df[filtered_df['municipio'] == selected_region]
         
-        # Parcel area filtering with exact values and unlimited option
-        if final_parcel_range[0] > 0 or final_parcel_range[1] < 100000:
-            if parcel_unlimited or final_parcel_range[1] == 100000:
-                # When unlimited is checked, include all parcels >= min value
-                filtered_df = filtered_df[filtered_df['superficie_parcela'] >= final_parcel_range[0]]
-            else:
-                # Normal range filtering with exact values
-                filtered_df = filtered_df[
-                    (filtered_df['superficie_parcela'] >= final_parcel_range[0]) & 
-                    (filtered_df['superficie_parcela'] <= final_parcel_range[1])
-                ]
+        # Parcel area filtering
+        if final_parcel_range[0] > 0 or final_parcel_range[1] < 1000000:
+            filtered_df = filtered_df[
+                (filtered_df['superficie_parcela'] >= final_parcel_range[0]) & 
+                (filtered_df['superficie_parcela'] <= final_parcel_range[1])
+            ]
         
-        # Built area filtering with exact values and unlimited option
-        if final_built_range[0] > 0 or final_built_range[1] < 1000:
+        # Built area filtering
+        if final_built_range[0] > 0 or final_built_range[1] < 100000:
             if area_search_type == "Total built area on parcel":
                 # Traditional total built area filtering
-                if built_unlimited or final_built_range[1] == 1000:
-                    # When unlimited is checked, include all built areas >= min value
-                    filtered_df = filtered_df[filtered_df['total_built_area'] >= final_built_range[0]]
-                else:
-                    # Normal range filtering with exact values
-                    filtered_df = filtered_df[
-                        (filtered_df['total_built_area'] >= final_built_range[0]) & 
-                        (filtered_df['total_built_area'] <= final_built_range[1])
-                    ]
+                filtered_df = filtered_df[
+                    (filtered_df['total_built_area'] >= final_built_range[0]) & 
+                    (filtered_df['total_built_area'] <= final_built_range[1])
+                ]
             else:
                 # Individual building/unit area filtering
                 def has_individual_area_in_range(row):
@@ -688,12 +644,8 @@ def main():
                         for area_str in building_areas:
                             try:
                                 area = float(area_str)
-                                if built_unlimited or final_built_range[1] == 1000:
-                                    if area >= final_built_range[0]:
-                                        return True
-                                else:
-                                    if final_built_range[0] <= area <= final_built_range[1]:
-                                        return True
+                                if final_built_range[0] <= area <= final_built_range[1]:
+                                    return True
                             except (ValueError, TypeError):
                                 continue
                     
@@ -703,12 +655,8 @@ def main():
                         for area_str in unit_areas:
                             try:
                                 area = float(area_str)
-                                if built_unlimited or final_built_range[1] == 1000:
-                                    if area >= final_built_range[0]:
-                                        return True
-                                else:
-                                    if final_built_range[0] <= area <= final_built_range[1]:
-                                        return True
+                                if final_built_range[0] <= area <= final_built_range[1]:
+                                    return True
                             except (ValueError, TypeError):
                                 continue
                     
@@ -787,25 +735,7 @@ def main():
                         if map_data.get('last_object_clicked_popup'):
                             st.info("💡 Click on map markers to see property details!")
                         
-                        # Debug info
-                        if st.checkbox("Show debug info", value=False):
-                            st.write(f"**Debug Information:**")
-                            st.write(f"- Geometry DF shape: {geometry_df.shape if geometry_df is not None else 'None'}")
-                            st.write(f"- Search results count: {len(map_df)}")
-                            st.write(f"- MAP_AVAILABLE: {MAP_AVAILABLE}")
-                            if geometry_df is not None and not geometry_df.empty:
-                                st.write(f"- Available geometry columns: {list(geometry_df.columns)}")
-                                
-                                # Test coordinate extraction on first result
-                                if not map_df.empty:
-                                    test_ref = map_df.iloc[0]['referencia_catastral']
-                                    test_geom_row = geometry_df[geometry_df['referencia_catastral'] == test_ref]
-                                    if not test_geom_row.empty:
-                                        test_geom = test_geom_row.iloc[0].get('geometry')
-                                        test_lat, test_lon = extract_geometry_center(test_geom)
-                                        st.write(f"- Test coordinate extraction for {test_ref}: {test_lat}, {test_lon}")
-                                    else:
-                                        st.write(f"- ❌ No geometry found for test property {test_ref}")
+
                     else:
                         st.error("Failed to create map")
             else:
